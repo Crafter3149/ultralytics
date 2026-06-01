@@ -1,0 +1,77 @@
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+
+# Ultralytics YOLO26 variant for tiny objects (boxes <= 16px)
+# Detect heads: P1/2, P2/4, P3/8  (NO P4/P5 heads — they would be <=1 cell for tiny boxes)
+# Backbone is byte-for-byte identical to yolo26.yaml so pretrained yolo26*.pt backbone
+# weights can be loaded with `pretrained=yolo26n.pt` (head is retrained).
+#
+# P1 source = raw idx-0 Conv (16ch @ n scale). Top-down PAN-FPN brings semantic
+# context from C2PSA at P5 down to P1, so the raw P1 stream is fine.
+#
+# Cell coverage for a 16px box (imgsz=640):
+#   P1 (stride 2):  8x8 = 64 cells
+#   P2 (stride 4):  4x4 = 16 cells
+#   P3 (stride 8):  2x2 = 4 cells
+#   P4 (stride 16): 1 cell  -> dropped
+#   P5 (stride 32): <1 cell -> dropped
+
+# Parameters
+nc: 80 # number of classes
+end2end: True # whether to use end-to-end mode
+reg_max: 1 # DFL bins
+scales: # model compound scaling constants, i.e. 'model=yolo26n-p1.yaml' will call yolo26-p1.yaml with scale 'n'
+  # [depth, width, max_channels]
+  n: [0.50, 0.25, 1024]
+  s: [0.50, 0.50, 1024]
+  m: [0.50, 1.00, 512]
+  l: [1.00, 1.00, 512]
+  x: [1.00, 1.50, 512]
+
+# Backbone IDENTICAL to yolo26.yaml (so pretrained backbone weights load 1:1)
+backbone:
+  # [from, repeats, module, args]
+  - [-1, 1, Conv, [64, 3, 2]] # 0-P1/2   <-- P1 source (raw 16ch @ n)
+  - [-1, 1, Conv, [128, 3, 2]] # 1-P2/4
+  - [-1, 2, C3k2, [256, False, 0.25]] # 2  <-- P2 source
+  - [-1, 1, Conv, [256, 3, 2]] # 3-P3/8
+  - [-1, 2, C3k2, [512, False, 0.25]] # 4  <-- P3 source
+  - [-1, 1, Conv, [512, 3, 2]] # 5-P4/16
+  - [-1, 2, C3k2, [512, True]] # 6        <-- P4 source (for FPN context only)
+  - [-1, 1, Conv, [1024, 3, 2]] # 7-P5/32
+  - [-1, 2, C3k2, [1024, True]] # 8
+  - [-1, 1, SPPF, [1024, 5, 3, True]] # 9
+  - [-1, 2, C2PSA, [1024]] # 10           <-- P5 source (for FPN context only)
+
+# Head: PAN-FPN top-down P5 -> P4 -> P3 -> P2 -> P1, then bottom-up P1 -> P2 -> P3
+head:
+  # Top-down: P5 -> P4
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]] # 11
+  - [[-1, 6], 1, Concat, [1]] # 12  cat backbone P4
+  - [-1, 2, C3k2, [512, True]] # 13  P4 mid (FPN context, no detect)
+
+  # Top-down: P4 -> P3
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]] # 14
+  - [[-1, 4], 1, Concat, [1]] # 15  cat backbone P3
+  - [-1, 2, C3k2, [256, True]] # 16  P3 mid
+
+  # Top-down: P3 -> P2
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]] # 17
+  - [[-1, 2], 1, Concat, [1]] # 18  cat backbone P2
+  - [-1, 2, C3k2, [128, True]] # 19  P2 mid
+
+  # Top-down: P2 -> P1
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]] # 20
+  - [[-1, 0], 1, Concat, [1]] # 21  cat backbone P1 (raw 16ch from idx 0)
+  - [-1, 2, C3k2, [64, True]] # 22  P1 OUT (P1/2-tiny)
+
+  # Bottom-up: P1 -> P2
+  - [-1, 1, Conv, [64, 3, 2]] # 23
+  - [[-1, 19], 1, Concat, [1]] # 24  cat head P2 mid
+  - [-1, 2, C3k2, [128, True]] # 25  P2 OUT (P2/4-xsmall)
+
+  # Bottom-up: P2 -> P3
+  - [-1, 1, Conv, [128, 3, 2]] # 26
+  - [[-1, 16], 1, Concat, [1]] # 27  cat head P3 mid
+  - [-1, 1, C3k2, [256, True, 0.5, True]] # 28  P3 OUT (P3/8-small, with attn)
+
+  - [[22, 25, 28], 1, Detect, [nc]] # 29  Detect(P1, P2, P3)

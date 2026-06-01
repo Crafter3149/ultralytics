@@ -107,6 +107,24 @@ class DFLoss(nn.Module):
         ).mean(-1, keepdim=True)
 
 
+def bbox_nwd(pred_xyxy: torch.Tensor, target_xyxy: torch.Tensor, c: float = 13.0) -> torch.Tensor:
+    """Normalized Wasserstein Distance similarity between xyxy boxes, in (0, 1] (higher = better).
+
+    Boxes are modeled as 2D Gaussians N((cx, cy), diag((w/2)^2, (h/2)^2)); `c` normalizes the
+    Wasserstein-2 distance and must be in the SAME unit as the box coords (here: input-image px).
+    """
+    cx_p = (pred_xyxy[..., 0] + pred_xyxy[..., 2]) * 0.5
+    cy_p = (pred_xyxy[..., 1] + pred_xyxy[..., 3]) * 0.5
+    w_p = pred_xyxy[..., 2] - pred_xyxy[..., 0]
+    h_p = pred_xyxy[..., 3] - pred_xyxy[..., 1]
+    cx_t = (target_xyxy[..., 0] + target_xyxy[..., 2]) * 0.5
+    cy_t = (target_xyxy[..., 1] + target_xyxy[..., 3]) * 0.5
+    w_t = target_xyxy[..., 2] - target_xyxy[..., 0]
+    h_t = target_xyxy[..., 3] - target_xyxy[..., 1]
+    w2 = (cx_p - cx_t) ** 2 + (cy_p - cy_t) ** 2 + ((w_p - w_t) * 0.5) ** 2 + ((h_p - h_t) * 0.5) ** 2
+    return torch.exp(-torch.sqrt(w2 + 1e-7) / c)
+
+
 class BboxLoss(nn.Module):
     """Criterion class for computing training losses for bounding boxes."""
 
@@ -114,6 +132,12 @@ class BboxLoss(nn.Module):
         """Initialize the BboxLoss module with regularization maximum and DFL settings."""
         super().__init__()
         self.dfl_loss = DFLoss(reg_max) if reg_max > 1 else None
+        # --- experiment E_NWD (box loss CIoU -> NWD), toggled via env ---
+        import os
+
+        self.nwd = os.environ.get("EXP_NWD", "0") == "1"
+        self.nwd_c = float(os.environ.get("EXP_NWD_C", "13.0"))
+        self.nwd_ratio = float(os.environ.get("EXP_NWD_RATIO", "1.0"))  # 1.0 = pure NWD swap
 
     def forward(
         self,
@@ -129,8 +153,18 @@ class BboxLoss(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute IoU and DFL losses for bounding boxes."""
         weight = target_scores.sum(-1)[fg_mask].unsqueeze(-1)
-        iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True)
-        loss_iou = ((1.0 - iou) * weight).sum() / target_scores_sum
+        if self.nwd:
+            # boxes are in grid units; *stride -> input-image px so nwd_c (px) applies
+            stride_fg = stride.unsqueeze(0).expand(fg_mask.shape[0], -1, -1)[fg_mask]
+            nwd = bbox_nwd(pred_bboxes[fg_mask] * stride_fg, target_bboxes[fg_mask] * stride_fg, self.nwd_c)
+            box_term = (1.0 - nwd).unsqueeze(-1)
+            if self.nwd_ratio < 1.0:  # optional blend with CIoU
+                iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True)
+                box_term = self.nwd_ratio * box_term + (1.0 - self.nwd_ratio) * (1.0 - iou)
+            loss_iou = (box_term * weight).sum() / target_scores_sum
+        else:
+            iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True)
+            loss_iou = ((1.0 - iou) * weight).sum() / target_scores_sum
 
         # DFL loss
         if self.dfl_loss:
@@ -352,6 +386,13 @@ class v8DetectionLoss:
 
         self.use_dfl = m.reg_max > 1
 
+        # --- experiment E_FOCAL (cls BCE -> focal), toggled via env ---
+        import os
+
+        self.focal = os.environ.get("EXP_FOCAL", "0") == "1"
+        self.focal_alpha = float(os.environ.get("EXP_FOCAL_ALPHA", "0.25"))
+        self.focal_gamma = float(os.environ.get("EXP_FOCAL_GAMMA", "2.0"))
+
         # Class weights for handling imbalanced datasets
         self.class_weights = getattr(model, "class_weights", None)
         if self.class_weights is not None:
@@ -432,6 +473,13 @@ class v8DetectionLoss:
 
         # Cls loss with optional class weighting
         bce_loss = self.bce(pred_scores, target_scores.to(dtype))  # (bs, num_anchors, nc)
+        if self.focal:  # E_FOCAL: focal modulation on the BCE (soft TaskAligned targets)
+            p = pred_scores.sigmoid()
+            t = target_scores.to(dtype)
+            p_t = t * p + (1 - t) * (1 - p)
+            bce_loss = bce_loss * ((1.0 - p_t) ** self.focal_gamma)
+            if self.focal_alpha >= 0:
+                bce_loss = bce_loss * (self.focal_alpha * t + (1 - self.focal_alpha) * (1 - t))
         if self.class_weights is not None:
             bce_loss *= self.class_weights
         loss[1] = bce_loss.sum() / target_scores_sum  # BCE
