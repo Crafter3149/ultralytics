@@ -11,6 +11,8 @@ the matching, NMS, and AP integration are byte-identical to the standard metric.
 import sys
 
 import torch
+
+import ultralytics
 from ultralytics import YOLO
 from ultralytics.models.yolo.detect import DetectionValidator
 
@@ -33,7 +35,8 @@ def main():
     m = model.val(validator=LowIoUValidator, data=DATA, split=SPLIT, imgsz=IMGSZ,
                   workers=0, plots=False, verbose=False)
     ap = m.box.all_ap  # (nc, len(THRS))
-    print(f"\nmodel: {MODEL}")
+    print(f"\nultralytics {ultralytics.__version__}  ({ultralytics.__file__})")
+    print(f"model: {MODEL}")
     print(f"mp(mean precision)={m.box.mp:.4f}  mr(mean recall)={m.box.mr:.4f}  (at best-F1 conf)")
     for k, t in enumerate(THRS):
         print(f"  AP@{t:.2f} = {ap[:, k].mean():.4f}")

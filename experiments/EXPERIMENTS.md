@@ -52,25 +52,27 @@ close_mosaic: 20         # 最後 20 epoch 關 mosaic
 
 ## 評估指標（benchmark）
 
-**碰撞級 AP（IoU≥0.1）= recall + precision 綜合**，不是 mAP50/mAP50-95。物件極小（median ~13px、尾至 5px），mAP50 要求 IoU≥0.5 等於內建「框要貼緊」的要求——對小物件無意義，還把「找到但框鬆」的偵測誤判成漏抓（E0 test 從 IoU 0.5→0.1 回升 ~6 點：0.746→0.805，就是被冤枉掉的）。IoU 本身沒問題，問題在門檻；用 IoU≥0.1 當「有沒有相撞 = 有沒有找到」的判定，一對一指派。工具 `experiments/eval_iou.py`（只覆寫 `iouv`，AP@0.5 已驗證重現官方 mAP50 → AP@0.1 可信）。部署再從 P-R 曲線挑操作點（漏抓較糟就偏 recall）。
+**碰撞級 AP（IoU≥0.1）= recall + precision 綜合**，不是 mAP50/mAP50-95。物件極小（median ~13px、尾至 5px），mAP50 要求 IoU≥0.5 等於內建「框要貼緊」的要求——對小物件無意義，還把「找到但框鬆」的偵測誤判成漏抓（E0 test 從 IoU 0.5→0.1 回升 ~4 點：0.734→0.777，就是被冤枉掉的）。IoU 本身沒問題，問題在門檻；用 IoU≥0.1 當「有沒有相撞 = 有沒有找到」的判定，一對一指派。工具 `experiments/eval_iou.py`（只覆寫 `iouv`，AP@0.5 已驗證重現官方 mAP50 → AP@0.1 可信）。部署再從 P-R 曲線挑操作點（漏抓較糟就偏 recall）。
+
+**評估環境（2026-06-02 修訂）**：mAP **對 ultralytics 版本不恆定**——同權重同資料，8.3.168 與 8.4.53 的 AP 可差到 .08。兩個原因：(1) end2end head 的分數計算改了（同框 confidence 分布不同）；(2) `compute_ap` 尾段改了（舊版把「超過模型最高召回」那段精度線性滑到 0、白送一塊 AP；新版直接歸 0），對低召回模型（如 E_FOCAL）砍得多。**本表一律以 ultralytics 8.4.53（fork = 3090 訓練版本）重評為準**，舊 8.3.168 數字停用。dev box 上 eval 須設 `PYTHONPATH=D:\Project\my\ultralytics` 才會用到 fork（venv pip 是 8.3.168）。
 
 ## 進度表
 
 | ID | 組 | 名稱 | 依賴 | 採納條件 | 狀態 | AP@0.1 | Recall | Precision |
 |----|----|------|------|----------|------|--------|--------|-----------|
-| E0 | — | Baseline yolo26n | — | (anchor) | ✅ | 0.950 / 0.805 | 0.919 / 0.758 | 0.926 / 0.929 |
-| E_NWD | A | CIoU → NWD | E0 | ΔAP@0.1 ≳ +.01 | ❌ | 0.929 / 0.797 | 0.876 / 0.750 | 0.915 / 0.905 |
-| E_DFL | A | reg_max 1 → 4 | E0 | ΔAP@0.1 ≳ +.01 | ❌ | 0.936 / 0.806 | 0.898 / 0.748 | 0.909 / 0.914 |
-| E_FOCAL | A | cls BCE → focal | E0 | ΔAP@0.1 ≳ +.01 | ❌ | 0.921 / 0.814 | 0.867 / 0.748 | 0.857 / 0.900 |
-| E0+ | — | = E0（A 組無勝出） | — | (= E0) | 🔒 | 0.950 / 0.805 | 0.919 / 0.758 | 0.926 / 0.929 |
+| E0 | — | Baseline yolo26n | — | (anchor) | ✅ | 0.946 / 0.777 | 0.915 / 0.767 | 0.910 / 0.889 |
+| E_NWD | A | CIoU → NWD | E0 | ΔAP@0.1 ≳ +.01 | ❌ | 0.932 / 0.776 | 0.881 / 0.749 | 0.869 / 0.853 |
+| E_DFL | A | reg_max 1 → 4 | E0 | ΔAP@0.1 ≳ +.01 | ❌ | 0.925 / 0.772 | 0.915 / 0.721 | 0.892 / 0.899 |
+| E_FOCAL | A | cls BCE → focal | E0 | ΔAP@0.1 ≳ +.01 | ❌ | 0.838 / 0.758 | 0.752 / 0.696 | 0.799 / 0.809 |
+| E0+ | — | = E0（A 組無勝出） | — | (= E0) | 🔒 | 0.946 / 0.777 | 0.915 / 0.767 | 0.910 / 0.889 |
 | E1 | B | +P2 head (P2/P3/P4/P5) | E0+ | 比 E0+ ΔAP@0.1 ≳ +.01 | ⬜ | | | |
 | E2 | B | P1/P2/P3（無 P4/P5） | E0+ | 比 E1 ΔAP@0.1 ≳ +.01 | ⬜ | | | |
 | E_DINO | C | DINOv3 ConvNeXt-B backbone | E0 | 對照組，獨立比較 | ⬜ | | | |
 
 狀態圖例：⬜ pending ｜🟡 running ｜✅ done ｜❌ failed ｜🔒 locked-in
-指標基準：每格 = **val / test** 的碰撞級（IoU≥0.1、一對一）`eval_iou.py` AP@0.1 / best-F1 Recall / Precision（定義見「評估指標」節）。test 僅 240 box，±.01 內為噪聲。**A 組在 val 上三個都明顯低於 E0（0.92–0.94 vs 0.950，超噪聲），test 上打平——兩個 split 都沒贏過 E0。** E_FOCAL test 名目最高(0.814)卻 val 最差(0.921) → 確認噪聲。
+指標基準：每格 = **val / test** 的碰撞級（IoU≥0.1、一對一）`eval_iou.py` AP@0.1 / best-F1 Recall / Precision（定義見「評估指標」節；ultralytics 8.4.53）。test 僅 240 box，±.01 內為噪聲。**A 組三項在 val/test 兩個 split 都 ≤ E0，沒有一項贏過 E0；E_FOCAL 兩 split 都明顯最差（val AP@0.1 −.108、recall −.16）。**
 
-**A 組結論（2026-06-02，碰撞級 AP@0.1，val / test）**：E0 **0.950 / 0.805**｜E_NWD 0.929 / 0.797｜E_DFL 0.936 / 0.806｜E_FOCAL 0.921 / 0.814。**val 上三個都明顯低於 E0（−.014 ~ −.029，超出噪聲）**，test 上打平（±.01 內）；**recall 兩個 split 都 ≤ E0**——沒有一個救回那 ~24% 真漏抓。E_FOCAL test 名目最高卻 val 最差 → 噪聲。**三個全 reject，E0+ = E0。** loss 改動動不了瓶頸 → 瓶頸在偵測能力/解析度 → 轉 **Track B（P2/P1 head）**。工具 `experiments/eval_iou.py`。
+**A 組結論（2026-06-02，碰撞級 AP@0.1，val / test，ultralytics 8.4.53）**：E0 **0.946 / 0.777**｜E_NWD 0.932 / 0.776｜E_DFL 0.925 / 0.772｜E_FOCAL 0.838 / 0.758。**三項在 val 都低於 E0（−.014 ~ −.108）、test 也都 ≤ E0；recall 兩 split 皆 ≤ E0**——沒有一個救回那 ~24% 真漏抓，E_FOCAL 反而大傷 recall（val 0.752 vs 0.915）。**三個全 reject，E0+ = E0。** loss 改動動不了瓶頸 → 瓶頸在偵測能力/解析度 → 轉 **Track B（P2/P1 head）**。（早先 8.3.168 下 FOCAL 看似打平＝噪聲，是舊 AP 尾段白送分把低召回模型撐高的假象，已更正。）工具 `experiments/eval_iou.py`。
 
 ## A 組採納規則
 
