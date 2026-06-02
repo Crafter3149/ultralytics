@@ -1,14 +1,26 @@
-"""Run one small-object A-group experiment with a single command.
+"""Run one small-object experiment with a single command.
 
-    python run_experiment.py E0       # baseline yolo26n
+    A-group (loss/channel ablations on the baseline head):
+    python run_experiment.py E0       # baseline yolo26n (Detect P3/P4/P5)
     python run_experiment.py E_NWD    # box loss CIoU -> NWD (C=13)
     python run_experiment.py E_DFL    # reg_max 1 -> 4 (DFL on)
     python run_experiment.py E_FOCAL  # cls BCE -> focal (a=0.25, g=2.0)
 
+    B-group (Track B head architecture; A-group all rejected so E0+ = E0, no loss flags):
+    python run_experiment.py E1       # +P2 head -> Detect(P2,P3,P4,P5)  [yolo26-p2.yaml]
+    python run_experiment.py E2       # P1/P2/P3 head, no P4/P5          [yolo26-p1.yaml]
+    python run_experiment.py E2 1     # optional 2nd arg = batch override (see VRAM note)
+
 E_NWD / E_FOCAL are toggled via env vars read inside ultralytics/utils/loss.py
-(so the modified loss.py must be installed). E_DFL changes reg_max in the model
-config. All share the same baseline hyperparameters and dataset, so the runs are
-directly comparable. Edit the MACHINE CONFIG block for the 3090 box.
+(so the modified loss.py must be installed). E_DFL / E1 / E2 change the model
+config; their new head layers partial-load (backbone loads 1:1 from yolo26n.pt,
+head is retrained via intersect_dicts). All share the same baseline hyperparameters
+and dataset, so runs are directly comparable. Edit MACHINE CONFIG for the 3090 box.
+
+VRAM: P2 (E1) and especially P1 (E2) add high-res feature maps at imgsz=1408
+(P2 stride4 = 352x352 grid, P1 stride2 = 704x704 grid), so activation memory and
+the per-anchor loss blow up vs baseline. Baseline batch=2 already sits at the 24GB
+limit. If E1/E2 OOM, lower batch via the 2nd arg (e.g. `run_experiment.py E2 1`).
 """
 
 import os
@@ -65,15 +77,23 @@ def configure(exp: str) -> str:
         os.environ["EXP_FOCAL"] = "1"
         os.environ["EXP_FOCAL_ALPHA"] = "0.25"
         os.environ["EXP_FOCAL_GAMMA"] = "2.0"
+    elif exp == "E1":
+        cfg = "yolo26n-p2.yaml"   # Track B: add P2 head -> Detect(P2,P3,P4,P5)
+    elif exp == "E2":
+        cfg = "yolo26n-p1.yaml"   # Track B: P1/P2/P3 head, no P4/P5 -> Detect(P1,P2,P3)
     else:
-        raise SystemExit(f"unknown experiment {exp!r}; use E0 / E_NWD / E_DFL / E_FOCAL")
+        raise SystemExit(f"unknown experiment {exp!r}; use E0 / E_NWD / E_DFL / E_FOCAL / E1 / E2")
     return cfg
 
 
 def main():
     cfg = configure(EXP)
+    hyp = dict(HYP)
+    if len(sys.argv) > 2:        # optional batch override: `run_experiment.py E2 1` (P1/P2 may OOM at batch=2)
+        hyp["batch"] = int(sys.argv[2])
     print(f"[run] experiment = {EXP}")
     print(f"[run] model cfg  = {cfg}")
+    print(f"[run] batch      = {hyp['batch']}  imgsz={hyp['imgsz']}  epochs={hyp['epochs']}")
     print(f"[run] flags      = NWD={os.environ.get('EXP_NWD', '0')} "
           f"FOCAL={os.environ.get('EXP_FOCAL', '0')} C={os.environ.get('EXP_NWD_C', '-')}")
 
@@ -85,9 +105,9 @@ def main():
         name=EXP,
         project=PROJECT,
         exist_ok=True,
-        pretrained=PRETRAINED,   # intersect_dicts partial-loads when reg_max changes (E_DFL)
+        pretrained=PRETRAINED,   # intersect_dicts partial-loads when the head changes (E_DFL / E1 / E2)
         workers=WORKERS,
-        **HYP,
+        **hyp,
     )
     print(f"[done] {EXP}: best weights under {PROJECT}\\{EXP}\\weights\\best.pt")
 
