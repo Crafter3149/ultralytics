@@ -10,6 +10,10 @@
     python run_experiment.py E1       # +P2 head -> Detect(P2,P3,P4,P5)  [yolo26-p2.yaml]
     python run_experiment.py E2       # P1/P2/P3 head, no P4/P5          [yolo26-p1.yaml]
     python run_experiment.py E2 1     # optional 2nd arg = batch override (see VRAM note)
+    python run_experiment.py E1_FOCAL # E1's P2 head + focal cls (2nd-round, for the cls imbalance E1 showed)
+    python run_experiment.py E1_NWD       # E1 head + box NWD
+    python run_experiment.py E1_FOCAL_NWD # E1 head + focal + NWD
+    python run_experiment.py E0_RERUN     # E0 baseline, different seed (probe E0 training variance)
 
 E_NWD / E_FOCAL are toggled via env vars read inside ultralytics/utils/loss.py
 (so the modified loss.py must be installed). E_DFL / E1 / E2 change the model
@@ -81,8 +85,28 @@ def configure(exp: str) -> str:
         cfg = "yolo26n-p2.yaml"   # Track B: add P2 head -> Detect(P2,P3,P4,P5)
     elif exp == "E2":
         cfg = "yolo26n-p1.yaml"   # Track B: P1/P2/P3 head, no P4/P5 -> Detect(P1,P2,P3)
+    elif exp == "E1_FOCAL":
+        cfg = "yolo26n-p2.yaml"   # 2nd-round: E1's P2 head + focal cls (rescue the cls imbalance E1 showed)
+        os.environ["EXP_FOCAL"] = "1"
+        os.environ["EXP_FOCAL_ALPHA"] = "0.25"
+        os.environ["EXP_FOCAL_GAMMA"] = "2.0"
+    elif exp == "E1_NWD":
+        cfg = "yolo26n-p2.yaml"   # E1 head + box NWD
+        os.environ["EXP_NWD"] = "1"
+        os.environ["EXP_NWD_C"] = "13.0"
+        os.environ["EXP_NWD_RATIO"] = "1.0"
+    elif exp == "E1_FOCAL_NWD":
+        cfg = "yolo26n-p2.yaml"   # E1 head + focal cls + box NWD (both A-group losses on the P2 head)
+        os.environ["EXP_FOCAL"] = "1"
+        os.environ["EXP_FOCAL_ALPHA"] = "0.25"
+        os.environ["EXP_FOCAL_GAMMA"] = "2.0"
+        os.environ["EXP_NWD"] = "1"
+        os.environ["EXP_NWD_C"] = "13.0"
+        os.environ["EXP_NWD_RATIO"] = "1.0"
+    elif exp == "E0_RERUN":
+        pass                      # baseline config; main() sets a different seed to probe E0 training variance
     else:
-        raise SystemExit(f"unknown experiment {exp!r}; use E0 / E_NWD / E_DFL / E_FOCAL / E1 / E2")
+        raise SystemExit(f"unknown experiment {exp!r}; use E0 / E_NWD / E_DFL / E_FOCAL / E1 / E2 / E1_FOCAL / E1_NWD / E1_FOCAL_NWD / E0_RERUN")
     return cfg
 
 
@@ -91,6 +115,8 @@ def main():
     hyp = dict(HYP)
     if len(sys.argv) > 2:        # optional batch override: `run_experiment.py E2 1` (P1/P2 may OOM at batch=2)
         hyp["batch"] = int(sys.argv[2])
+    if EXP == "E0_RERUN":
+        hyp["seed"] = 1          # != default seed 0: probe whether E0's win is training-seed luck
     print(f"[run] experiment = {EXP}")
     print(f"[run] model cfg  = {cfg}")
     print(f"[run] batch      = {hyp['batch']}  imgsz={hyp['imgsz']}  epochs={hyp['epochs']}")

@@ -65,7 +65,11 @@ close_mosaic: 20         # 最後 20 epoch 關 mosaic
 | E_DFL | A | reg_max 1 → 4 | E0 | ΔAP@0.1 ≳ +.01 | ❌ | 0.925 / 0.772 | 0.915 / 0.721 | 0.892 / 0.899 |
 | E_FOCAL | A | cls BCE → focal | E0 | ΔAP@0.1 ≳ +.01 | ❌ | 0.838 / 0.758 | 0.752 / 0.696 | 0.799 / 0.809 |
 | E0+ | — | = E0（A 組無勝出） | — | (= E0) | 🔒 | 0.946 / 0.777 | 0.915 / 0.767 | 0.910 / 0.889 |
-| E1 | B | +P2 head (P2/P3/P4/P5) | E0+ | 比 E0+ ΔAP@0.1 ≳ +.01 | ⬜ | | | |
+| E0_RERUN | ctrl | E0 重跑（seed≠0） | E0 | 與 E0 一致 → E0 之勝非 seed 運氣 | ⬜ | | | |
+| E1 | B | +P2 head (P2/P3/P4/P5) | E0+ | 比 E0+ ΔAP@0.1 ≳ +.01 | ❌ | 0.902 / 0.741 | 0.863 / 0.675 | 0.822 / 0.844 |
+| E1_FOCAL | B | E1 + cls focal (α.25/γ2) | E1 | 救回 recall 且 ΔAP@0.1 ≳ +.01 vs E0+ | ⬜ | | | |
+| E1_NWD | B | E1 + box NWD (C13) | E1 | ΔAP@0.1 ≳ +.01 vs E0+ | ⬜ | | | |
+| E1_FOCAL_NWD | B | E1 + focal + NWD | E1 | ΔAP@0.1 ≳ +.01 vs E0+ | ⬜ | | | |
 | E2 | B | P1/P2/P3（無 P4/P5） | E0+ | 比 E1 ΔAP@0.1 ≳ +.01 | ⬜ | | | |
 | E_DINO | C | DINOv3 ConvNeXt-B backbone | E0 | 對照組，獨立比較 | ⬜ | | | |
 
@@ -73,6 +77,8 @@ close_mosaic: 20         # 最後 20 epoch 關 mosaic
 指標基準：每格 = **val / test** 的碰撞級（IoU≥0.1、一對一）`eval_iou.py` AP@0.1 / best-F1 Recall / Precision（定義見「評估指標」節；ultralytics 8.4.53）。test 僅 240 box，±.01 內為噪聲。**A 組三項在 val/test 兩個 split 都 ≤ E0，沒有一項贏過 E0；E_FOCAL 兩 split 都明顯最差（val AP@0.1 −.108、recall −.16）。**
 
 **A 組結論（2026-06-02，碰撞級 AP@0.1，val / test，ultralytics 8.4.53）**：E0 **0.946 / 0.777**｜E_NWD 0.932 / 0.776｜E_DFL 0.925 / 0.772｜E_FOCAL 0.838 / 0.758。**三項在 val 都低於 E0（−.014 ~ −.108）、test 也都 ≤ E0；recall 兩 split 皆 ≤ E0**——沒有一個救回那 ~24% 真漏抓，E_FOCAL 反而大傷 recall（val 0.752 vs 0.915）。**三個全 reject，E0+ = E0。** loss 改動動不了瓶頸 → 瓶頸在偵測能力/解析度 → 轉 **Track B（P2/P1 head）**。（早先 8.3.168 下 FOCAL 看似打平＝噪聲，是舊 AP 尾段白送分把低召回模型撐高的假象，已更正。）工具 `experiments/eval_iou.py`。
+
+**B 組進度（2026-06-03，E1，ultralytics 8.4.53）**：E1（+P2 head）**全面低於 E0+**：AP@0.1 0.902 / 0.741（−.044 / −.036）、recall 0.863 / 0.675（−.052 / −.092）、precision 也降。**P2 head 不但沒救回 recall，反而傷最重**——precision 與 recall 同時下降，正是計畫書（E2 節）預測的 **cls imbalance**（P2 stride 4 ≈ 4× P3 的 anchor、絕大多數背景）。**E1 ❌ reject。** 下一步 **E1_FOCAL**（E1 + focal α.25/γ2）：focal 在 A 組（E0）被 reject，但計畫書本就要求「高解析 head 出現 imbalance 時重啟 focal」——E1_FOCAL 同時是「驗證 imbalance 假設」與「嘗試救回」。對比基準：E0+。一次排入佇列（`run_queue.py` 預設）：**E1_FOCAL、E1_NWD、E1_FOCAL_NWD、E0_RERUN**——前三個在 E1 的 P2 head 上分別試 focal / NWD / 兩者並用（皆 seed=0、與 E1 可比）；**E0_RERUN 用 seed=1 重跑 baseline，確認 E0 的 0.946 不是 seed 運氣**。
 
 ## A 組採納規則
 
@@ -112,6 +118,14 @@ close_mosaic: 20         # 最後 20 epoch 關 mosaic
 - P2(stride 4) 對 13px 主體給 ~3 cells；保留的 P4/P5 服務大顆粒尾巴（64–400px）。
 - **小主體與大尾巴一網打盡**，是尺寸跨度大的場景較穩的選擇。
 - 必帶 E0+ 的所有 A 組鎖定改動。對比基準：E0+。
+- **結果（2026-06-03，❌ reject）**：AP@0.1 0.902 / 0.741、recall 0.863 / 0.675、precision 0.822 / 0.844，全面低於 E0+。precision+recall 同降 → cls imbalance 症狀。訓練 176 epoch（早停）、best 在 epoch 107。轉 E1_FOCAL。
+
+### E1_FOCAL — E1 head + focal（B 組，二輪）
+- 同 E1 的 P2 head（`yolo26n-p2.yaml`）+ cls focal（`EXP_FOCAL=1`, α=0.25, γ=2.0），其餘超參同 baseline。
+- 動機：E1 出現 precision+recall 同降的 imbalance 症狀（P2 stride 4 的 anchor 數 ~4× P3，背景占壓倒多數）。focal 下調易分背景權重，理論上能緩解。
+- 既是「imbalance 是否為 E1 失敗主因」的驗證，也是「能否救回」的嘗試。
+- 對比基準：E0+（採納需 ΔAP@0.1 ≳ +.01 且 recall 不降）；另看是否 ≥ E1。
+- 指令：`python experiments/run_experiment.py E1_FOCAL`（VRAM 同 E1；OOM 則 `E1_FOCAL 1`）。
 
 ### E2 — yolo26-p1（B 組）
 - P1/P2/P3 head、無 P4/P5：`cfg/models/26/yolo26-p1.yaml`（`Detect(P1,P2,P3)`）。
