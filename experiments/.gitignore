@@ -3,3 +3,6 @@ yolo26n-reg4.yaml
 # dataset label caches / python caches
 *.cache
 __pycache__/
+# one-off diagnostic outputs / logs
+hard_floor/
+*.log

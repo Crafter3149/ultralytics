@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import torch
 import torch.nn as nn
 
@@ -9,6 +11,27 @@ from . import LOGGER
 from .metrics import bbox_iou, probiou
 from .ops import xywh2xyxy, xywhr2xyxyxyxy, xyxy2xywh
 from .torch_utils import TORCH_1_11
+
+
+def bbox_nwd(box1: torch.Tensor, box2: torch.Tensor, c: float = 13.0) -> torch.Tensor:
+    """Normalized Wasserstein Distance similarity in (0, 1] for xyxy boxes (higher = better).
+
+    Boxes are modeled as 2D Gaussians N((cx, cy), diag((w/2)^2, (h/2)^2)); `c` normalizes the
+    Wasserstein-2 distance and must be in the same unit as the box coords (input-image px here).
+    Unlike IoU, NWD is smooth for tiny objects (no cratering on sub-pixel shifts), so it is used
+    as the cls-target quality cap (E_NWDTAL) — STAL-matched small objects then are not
+    confidence-capped by their inherently-low IoU. Axis-aligned boxes only (detection, not OBB).
+    """
+    cx1 = (box1[..., 0] + box1[..., 2]) * 0.5
+    cy1 = (box1[..., 1] + box1[..., 3]) * 0.5
+    w1 = box1[..., 2] - box1[..., 0]
+    h1 = box1[..., 3] - box1[..., 1]
+    cx2 = (box2[..., 0] + box2[..., 2]) * 0.5
+    cy2 = (box2[..., 1] + box2[..., 3]) * 0.5
+    w2 = box2[..., 2] - box2[..., 0]
+    h2 = box2[..., 3] - box2[..., 1]
+    dist = (cx1 - cx2) ** 2 + (cy1 - cy2) ** 2 + ((w1 - w2) * 0.5) ** 2 + ((h1 - h2) * 0.5) ** 2
+    return torch.exp(-torch.sqrt(dist + 1e-7) / c)
 
 
 class TaskAlignedAssigner(nn.Module):
@@ -57,6 +80,10 @@ class TaskAlignedAssigner(nn.Module):
         self.beta = beta
         self.stride = stride
         self.stride_val = self.stride[1] if len(self.stride) > 1 else self.stride[0]
+        # E_NWDTAL: cap the cls soft-target by NWD (smooth for tiny objects) instead of IoU. Gated by env;
+        # OFF (default) => byte-identical to baseline. Selection/dedup still use IoU; only the cap changes.
+        self.nwd_cap = os.environ.get("EXP_NWDTAL", "0") == "1"
+        self.nwd_c = float(os.environ.get("EXP_NWDTAL_C", "13.0"))
         self.eps = eps
 
     @torch.no_grad()
@@ -123,7 +150,7 @@ class TaskAlignedAssigner(nn.Module):
             fg_mask (torch.Tensor): Foreground mask with shape (bs, num_total_anchors).
             target_gt_idx (torch.Tensor): Target ground truth indices with shape (bs, num_total_anchors).
         """
-        mask_pos, align_metric, overlaps = self.get_pos_mask(
+        mask_pos, align_metric, overlaps, nwd = self.get_pos_mask(
             pd_scores, pd_bboxes, gt_labels, gt_bboxes, anc_points, mask_gt
         )
 
@@ -137,7 +164,10 @@ class TaskAlignedAssigner(nn.Module):
         # Normalize
         align_metric *= mask_pos
         pos_align_metrics = align_metric.amax(dim=-1, keepdim=True)  # b, max_num_obj
-        pos_overlaps = (overlaps * mask_pos).amax(dim=-1, keepdim=True)  # b, max_num_obj
+        # E_NWDTAL: cap the cls-target magnitude by NWD (smooth for tiny objects) instead of IoU.
+        # Selection (select_topk) and dedup (select_highest_overlaps) above still use IoU `overlaps`.
+        cap = nwd if (self.nwd_cap and nwd is not None) else overlaps
+        pos_overlaps = (cap * mask_pos).amax(dim=-1, keepdim=True)  # b, max_num_obj
         norm_align_metric = (align_metric * pos_overlaps / (pos_align_metrics + self.eps)).amax(-2).unsqueeze(-1)
         target_scores = target_scores * norm_align_metric
 
@@ -161,13 +191,13 @@ class TaskAlignedAssigner(nn.Module):
         """
         mask_in_gts = self.select_candidates_in_gts(anc_points, gt_bboxes, mask_gt)
         # Get anchor_align metric, (b, max_num_obj, h*w)
-        align_metric, overlaps = self.get_box_metrics(pd_scores, pd_bboxes, gt_labels, gt_bboxes, mask_in_gts * mask_gt)
+        align_metric, overlaps, nwd = self.get_box_metrics(pd_scores, pd_bboxes, gt_labels, gt_bboxes, mask_in_gts * mask_gt)
         # Get topk_metric mask, (b, max_num_obj, h*w)
         mask_topk = self.select_topk_candidates(align_metric, topk_mask=mask_gt.expand(-1, -1, self.topk).bool())
         # Merge all mask to a final mask, (b, max_num_obj, h*w)
         mask_pos = mask_topk * mask_in_gts * mask_gt
 
-        return mask_pos, align_metric, overlaps
+        return mask_pos, align_metric, overlaps, nwd
 
     def get_box_metrics(self, pd_scores, pd_bboxes, gt_labels, gt_bboxes, mask_gt):
         """Compute alignment metric given predicted and ground truth bounding boxes.
@@ -200,7 +230,11 @@ class TaskAlignedAssigner(nn.Module):
         overlaps[mask_gt] = self.iou_calculation(gt_boxes, pd_boxes)
 
         align_metric = bbox_scores.pow(self.alpha) * overlaps.pow(self.beta)
-        return align_metric, overlaps
+        nwd = None
+        if self.nwd_cap:  # E_NWDTAL: NWD quality matrix for the cls-target cap (replaces IoU there)
+            nwd = torch.zeros_like(overlaps)
+            nwd[mask_gt] = bbox_nwd(gt_boxes, pd_boxes, self.nwd_c)
+        return align_metric, overlaps, nwd
 
     def iou_calculation(self, gt_bboxes, pd_bboxes):
         """Calculate IoU for horizontal bounding boxes.
