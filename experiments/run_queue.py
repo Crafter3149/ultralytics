@@ -14,7 +14,7 @@ import sys
 import time
 from pathlib import Path
 
-QUEUE = [a.upper() for a in sys.argv[1:]] or ["E1_FOCAL", "E1_NWD", "E1_FOCAL_NWD", "E0_RERUN"]
+QUEUE = [a.upper() for a in sys.argv[1:]] or ["E_NWDTAL", "E0_RERUN", "E_NWDTAL_FOCAL"]
 RUNNER = Path(__file__).resolve().parent / "run_experiment.py"
 PY = sys.executable
 

@@ -14,7 +14,8 @@
     python run_experiment.py E1_NWD       # E1 head + box NWD
     python run_experiment.py E1_FOCAL_NWD # E1 head + focal + NWD
     python run_experiment.py E0_RERUN     # E0 baseline, different seed (probe E0 training variance)
-    python run_experiment.py E_NWDTAL     # finetune E0; NWD (not IoU) caps the cls soft-target in the TAL assigner
+    python run_experiment.py E_NWDTAL       # fresh; NWD (not IoU) caps the cls soft-target in the TAL assigner
+    python run_experiment.py E_NWDTAL_FOCAL # E_NWDTAL + cls focal (a=0.25, g=2.0)
 
 E_NWD / E_FOCAL are toggled via env vars read inside ultralytics/utils/loss.py
 (so the modified loss.py must be installed). E_DFL / E1 / E2 change the model
@@ -37,7 +38,7 @@ import yaml
 # ============== MACHINE CONFIG (edit for the 3090 box) ==============
 DATA = r"D:\YannWorkspace\data\dataset\data.yaml"
 PROJECT = r"D:\YannWorkspace\runs\small_object"
-E0_WEIGHTS = PROJECT + r"\E0\weights\best.pt"   # E_NWDTAL finetunes from this; edit if E0 lives elsewhere
+E0_WEIGHTS = PROJECT + r"\E0\weights\best.pt"   # only for the optional finetune fallback (E_NWDTAL trains fresh by default)
 PRETRAINED = "yolo26n.pt"          # auto-downloaded if missing; partial-loads for E_DFL
 WORKERS = 8                         # set 0 if Windows multiprocessing errors
 
@@ -107,12 +108,17 @@ def configure(exp: str) -> str:
         os.environ["EXP_NWD_RATIO"] = "1.0"
     elif exp == "E0_RERUN":
         pass                      # baseline config; main() sets a different seed to probe E0 training variance
-    elif exp == "E_NWDTAL":
-        cfg = E0_WEIGHTS          # finetune from E0 baseline weights (main() also sets pretrained=E0_WEIGHTS)
+    elif exp == "E_NWDTAL":       # fresh from pretrained (same protocol as E0, directly comparable)
         os.environ["EXP_NWDTAL"] = "1"        # tal.py: cap cls soft-target by NWD instead of IoU
         os.environ["EXP_NWDTAL_C"] = "13.0"   # NWD norm const (px) = dataset median sqrt(w*h)
+    elif exp == "E_NWDTAL_FOCAL":  # NWD cls-target cap + cls focal (see EXPERIMENTS.md alpha caveat)
+        os.environ["EXP_NWDTAL"] = "1"
+        os.environ["EXP_NWDTAL_C"] = "13.0"
+        os.environ["EXP_FOCAL"] = "1"
+        os.environ["EXP_FOCAL_ALPHA"] = "0.25"
+        os.environ["EXP_FOCAL_GAMMA"] = "2.0"
     else:
-        raise SystemExit(f"unknown experiment {exp!r}; use E0 / E_NWD / E_DFL / E_FOCAL / E1 / E2 / E1_FOCAL / E1_NWD / E1_FOCAL_NWD / E0_RERUN / E_NWDTAL")
+        raise SystemExit(f"unknown experiment {exp!r}; use E0 / E_NWD / E_DFL / E_FOCAL / E1 / E2 / E1_FOCAL / E1_NWD / E1_FOCAL_NWD / E0_RERUN / E_NWDTAL / E_NWDTAL_FOCAL")
     return cfg
 
 
@@ -124,10 +130,6 @@ def main():
     if EXP == "E0_RERUN":
         hyp["seed"] = 1          # != default seed 0: probe whether E0's win is training-seed luck
     pretrained = PRETRAINED
-    if EXP == "E_NWDTAL":        # finetune from E0 to re-calibrate cls confidence: shorter run, lower LR
-        pretrained = E0_WEIGHTS
-        hyp["epochs"] = 120
-        hyp["lr0"] = 0.001
     print(f"[run] experiment = {EXP}")
     print(f"[run] model cfg  = {cfg}")
     print(f"[run] batch      = {hyp['batch']}  imgsz={hyp['imgsz']}  epochs={hyp['epochs']}")

@@ -72,7 +72,8 @@ close_mosaic: 20         # 最後 20 epoch 關 mosaic
 | E1_FOCAL_NWD | B | E1 + focal + NWD | E1 | — | 🚫 | | | |
 | E2 | B | P1/P2/P3（無 P4/P5） | E0+ | — | 🚫 | | | |
 | E_DINO | C | DINOv3 ConvNeXt-B backbone | E0 | 對照組，獨立比較 | ⬜ | | | |
-| **E_NWDTAL** | TAL | assigner cls-target 封頂 IoU→NWD（finetune E0）| E0 | ΔAP@0.1 ≳ +.01 且 recall 不降 | ⬜ | | | |
+| **E_NWDTAL** | TAL | assigner cls-target 封頂 IoU→NWD（fresh 200ep）| E0 | ΔAP@0.1 ≳ +.01 且 recall 不降 | ⬜ | | | |
+| E_NWDTAL_FOCAL | TAL | E_NWDTAL + cls focal (α.25/γ2) | E_NWDTAL | 比 E_NWDTAL / E0 更好 | ⬜ | | | |
 
 狀態圖例：⬜ pending ｜🟡 running ｜✅ done ｜❌ failed ｜🔒 locked-in ｜🚫 dropped
 指標基準：每格 = **val / test** 的碰撞級（IoU≥0.1、一對一）`eval_iou.py` AP@0.1 / best-F1 Recall / Precision（定義見「評估指標」節；ultralytics 8.4.53）。test 僅 240 box，±.01 內為噪聲。**A 組三項在 val/test 兩個 split 都 ≤ E0，沒有一項贏過 E0；E_FOCAL 兩 split 都明顯最差（val AP@0.1 −.108、recall −.16）。**
@@ -119,10 +120,14 @@ close_mosaic: 20         # 最後 20 epoch 關 mosaic
 ### E_NWDTAL — assigner cls-target 封頂 IoU → NWD（主攻，2026-06-03）
 - **根因**：STAL（`tal.py` `select_candidates_in_gts`）已把 < `stride[0]` 的小目標強制匹配進正樣本，但 TAL 的 cls 軟標籤 `target_scores *= norm_align_metric`、`norm_align_metric ∝ pos_overlaps`＝該 GT 真實最大 IoU（`tal.py:138-142`）。小物件 IoU ~0.5–0.7 → cls 目標封在 ~0.6 → 找得到卻給不了高信心 → 排序爛 → AP 不動。
 - **改法**：`get_box_metrics` 多算 NWD 矩陣；`forward` 把 `pos_overlaps` 來源由 `overlaps`(IoU) 換成 `nwd`。**只動 cls-target 封頂；選樣（`select_topk`）與去重（`select_highest_overlaps`）仍用 IoU。** env 閘控 `EXP_NWDTAL=1`（關閉時與原版逐字相同）、`EXP_NWDTAL_C=13`。
-- **協議**：從 E0 best.pt finetune（120 ep、lr0=0.001）。`python experiments/run_experiment.py E_NWDTAL`。
+- **協議**：從 pretrained 從頭訓 200ep（與 E0 同協議 → 乾淨可比）。`python experiments/run_experiment.py E_NWDTAL`。
 - **採納/預期**：比 E0+ ΔAP@0.1 ≳ +.01 且 recall 不降；機制上 TP confidence 應回升（對照 `diag_recall_ceiling`：E_FOCAL 0.39 / E1 0.56 → 目標接近 E0 的 0.65）。
 - **已驗證**：合成測試下 flag 開/關 `fg_mask` 不變（選樣未動）、`target_scores` 上升（封頂解放，+61%）。
-- **fallback**：若 finetune 推不動，改從 pretrained 重訓（cfg→`yolo26n.yaml`、`pretrained=yolo26n.pt`、200ep）。
+- **fallback（更快但較混淆）**：從 E0 finetune（cfg→`E0_WEIGHTS`、`pretrained=E0_WEIGHTS`、120ep），僅在沒時間重訓時用。
+
+### E_NWDTAL_FOCAL — E_NWDTAL + cls focal（過夜批次）
+- 在 E_NWDTAL 上再加 cls focal（`EXP_FOCAL=1`, α=0.25, γ=2.0），fresh 200ep。
+- ⚠️ **α=0.25 在本 impl 會下調正樣本權重**（E_FOCAL 實測把 TP conf 0.66→0.39），方向與 NWD-cap「催高信心」相反——本實驗測「硬樣本聚焦(γ) 疊在 NWD-cap 上是淨增益還是互相抵銷」。若被壓制，下一步把 α 調高。對比基準：E_NWDTAL 與 E0。
 
 ### E1 — yolo26-p2（B 組）
 - 加 P2 head、保留 P3/P4/P5：`cfg/models/26/yolo26-p2.yaml`（`Detect(P2,P3,P4,P5)`）。
